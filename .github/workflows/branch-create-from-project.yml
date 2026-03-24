@@ -1,0 +1,123 @@
+name: "Create Branch on Project Status Change"
+
+permissions:
+  contents: write    # For pushing branches
+  projects: read     # For reading ProjectV2 fields
+  issues: write      # For managing issue comments
+
+on:
+  projects_v2_item:
+    types: [edited]
+
+jobs:
+  manage-branch:
+    runs-on: ubuntu-latest
+    # Trigger only when:
+    # 1. Status field changed to 'In Progress'
+    # 2. The item is an Issue
+    if: >
+      github.event.changes.field_value.field_name == 'Status' &&
+      github.event.changes.field_value.to.name == 'In Progress' &&
+      github.event.projects_v2_item.content.__typename == 'Issue'
+
+    steps:
+      # Step 1: Fetch Project Fields
+      - name: "Fetch All Fields via GraphQL"
+        id: fetch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ITEM_DATA=$(gh api graphql -f query='
+            query($id: ID!) {
+              node(id: $id) {
+                ... on ProjectV2Item {
+                  content { __typename }
+                  fieldValues(first: 20) {
+                    nodes {
+                      ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } }
+                      ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
+                      ... on ProjectV2ItemFieldIterationValue { title field { ... on ProjectV2FieldCommon { name } } }
+                      ... on ProjectV2ItemFieldUserValue { users(first: 10) { login } field { ... on ProjectV2FieldCommon { name } } }
+                    }
+                  }
+                }
+              }
+            }' -f id=${{ github.event.projects_v2_item.id }})
+
+          echo "PRIORITY=$(echo "$ITEM_DATA" | jq -r '.data.node.fieldValues.nodes[] | select(.field.name=="Priority") | .name // ""')" >> $GITHUB_ENV
+          echo "ESTIMATE=$(echo "$ITEM_DATA" | jq -r '.data.node.fieldValues.nodes[] | select(.field.name=="Estimate") | .number // ""')" >> $GITHUB_ENV
+          echo "SPRINT=$(echo "$ITEM_DATA" | jq -r '.data.node.fieldValues.nodes[] | select(.field.name=="Sprint") | .title // ""')" >> $GITHUB_ENV
+          echo "ASSIGNEES=$(echo "$ITEM_DATA" | jq -r '[.data.node.fieldValues.nodes[] | select(.field.name=="Assignees") | .users[].login] | join(",") // ""')" >> $GITHUB_ENV
+
+          echo "[EXTRACTED] Priority:$PRIORITY | Estimate:$ESTIMATE | Sprint:$SPRINT | Assignees:$ASSIGNEES"
+
+      # Step 2: Handle Missing Fields (Warning with Marker)
+      - name: "Handle Missing Fields"
+        if: env.PRIORITY == '' || env.ESTIMATE == '' || env.SPRINT == '' || env.ASSIGNEES == ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.projects_v2_item.content.number }}
+        run: |
+          MARKER=""
+          WARNING_BODY=$(cat << EOF
+          **Branch Auto-Creation Failed**
+
+          Required fields (Priority, Estimate, Sprint, Assignees) are missing.
+
+          **Current Status:**
+          - Priority: ${PRIORITY:-None}
+          - Estimate: ${ESTIMATE:-None}
+          - Sprint: ${SPRINT:-None}
+          - Assignees: ${ASSIGNEES:-None}
+
+          Fill in all fields and reset Status to 'In Progress' to retry.
+
+          ${MARKER}
+          EOF
+          )
+
+          EXISTING=$(gh issue comment list $ISSUE_NUMBER --json id,body \
+            | jq -r --arg MARKER "$MARKER" '.[] | select(.body | contains($MARKER)) | .id' | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing warning comment: $EXISTING"
+            gh issue comment edit "$EXISTING" --body "$WARNING_BODY"
+          else
+            echo "Creating new warning comment"
+            gh issue comment create $ISSUE_NUMBER --body "$WARNING_BODY"
+          fi
+
+      # Step 3: Create Branch and Cleanup
+      - name: "Create Branch"
+        if: env.PRIORITY != '' && env.ESTIMATE != '' && env.SPRINT != '' && env.ASSIGNEES != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.projects_v2_item.content.number }}
+        run: |
+          ISSUE_TITLE="${{ github.event.projects_v2_item.content.title }}"
+          CLEAN_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-z0-9가-힣-]/-/g' | sed 's/-+/-/g' | sed 's/^-//;s/-$//')
+          BRANCH_NAME="[MYPROJ#${ISSUE_NUMBER}]-${CLEAN_TITLE}"
+
+          # Pre-clone branch existence check using full repository URL
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          if git ls-remote --heads "$REPO_URL" "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+            echo "Branch $BRANCH_NAME already exists. Skipping."
+            exit 0
+          fi
+
+          echo "Initializing branch creation from develop..."
+          gh repo clone ${{ github.repository }} . --depth 1 --branch develop
+          
+          git checkout -b "$BRANCH_NAME" origin/develop
+          git push -u origin "$BRANCH_NAME"
+
+          echo "Branch created: $BRANCH_NAME"
+
+          # Cleanup ALL existing warning comments
+          MARKER=""
+          gh issue comment list $ISSUE_NUMBER --json id,body \
+            | jq -r --arg MARKER "$MARKER" '.[] | select(.body | contains($MARKER)) | .id' \
+            | while read -r id; do
+                echo "Deleting comment: $id"
+                gh issue comment delete "$id" --yes
+              done || true
