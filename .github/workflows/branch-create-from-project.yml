@@ -2,7 +2,6 @@ name: "Create Branch on Project Status Change"
 
 permissions:
   contents: write    # For pushing branches
-  projects: read     # For reading ProjectV2 fields
   issues: write      # For managing issue comments
 
 on:
