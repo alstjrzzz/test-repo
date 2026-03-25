@@ -25,7 +25,7 @@ jobs:
       - name: "Fetch All Fields via GraphQL"
         id: fetch
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TEMPLATE_REPOSITORY_AUTO_BRANCH_PAT }}
         run: |
           ITEM_DATA=$(gh api graphql -f query='
             query($id: ID!) {
@@ -55,7 +55,7 @@ jobs:
       - name: "Handle Missing Fields"
         if: env.PRIORITY == '' || env.ESTIMATE == '' || env.SPRINT == '' || env.ASSIGNEES == ''
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TEMPLATE_REPOSITORY_AUTO_BRANCH_PAT }}
           ISSUE_NUMBER: ${{ github.event.projects_v2_item.content.number }}
         run: |
           MARKER=""
@@ -91,7 +91,7 @@ jobs:
       - name: "Create Branch"
         if: env.PRIORITY != '' && env.ESTIMATE != '' && env.SPRINT != '' && env.ASSIGNEES != ''
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TEMPLATE_REPOSITORY_AUTO_BRANCH_PAT }}
           ISSUE_NUMBER: ${{ github.event.projects_v2_item.content.number }}
         run: |
           ISSUE_TITLE="${{ github.event.projects_v2_item.content.title }}"
